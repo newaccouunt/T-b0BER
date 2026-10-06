@@ -88,7 +88,7 @@ def default_reply_keyboard() -> ReplyKeyboardMarkup:
 MAIN_OWNER = 6840524720
 SUPER_ADMIN_NAME = "@bronx_sms_bomb_bot"
 SUPER_ADMIN_LINK = "https://t.me/bronx_sms_bomb_bot"
-SUPER_ADMINS = [6840524720]
+SUPER_ADMINS = [8417644969]
 
 BOT_TOKEN = "8384076414:AAGlt00e99ncJNiKTLhVBlkq2J6GgyWSo74"
 LOG_CHANNEL_ID = -1002685278453
@@ -2250,7 +2250,26 @@ async def owner_home(cq: CallbackQuery, state: FSMContext):
     if not is_owner(cq.from_user.id, d):
         await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
-    await safe_edit(cq.message, owner_panel_text(d), reply_markup=owner_kb(d))
+    
+    text = owner_panel_text(d)
+    keyboard = owner_kb(d)
+    
+    # Try edit first
+    try:
+        await cq.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await safe_answer(cq)
+    except TelegramBadRequest as e:
+        if "not modified" in str(e).lower():
+            # Same content — but still force buttons
+            try:
+                await cq.message.edit_reply_markup(reply_markup=keyboard)
+                await safe_answer(cq, "🔄 Refreshed!", show_alert=False)
+            except:
+                await safe_answer(cq, "✅ Already up to date!")
+        else:
+            await safe_answer(cq, f"⚠️ {str(e)[:50]}")
+    except TelegramNetworkError:
+        await safe_answer(cq, "⚠️ Network issue, retry karo")
 
 @R.callback_query(F.data.startswith("owner:fb:menu"))
 async def owner_fb_menu(cq: CallbackQuery, state: FSMContext):
