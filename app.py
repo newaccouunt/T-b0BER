@@ -90,7 +90,7 @@ SUPER_ADMIN_NAME = "@bronx_sms_bomb_bot"
 SUPER_ADMIN_LINK = "https://t.me/bronx_sms_bomb_bot"
 SUPER_ADMINS = [8417644969]
 
-BOT_TOKEN = "8384076414:AAHpE_ZO3-Ns5f1I51dMUU--QklInWDYKzw"
+BOT_TOKEN = "8384076414:AAHlolWNw7CcTpgpjD1Wg1_-y9OcI3BRYAw"
 LOG_CHANNEL_ID = -1002906755597
 
 _DATA_FILE = "blast_data.json"
@@ -3701,21 +3701,32 @@ async def global_error_handler(event, exception):
     log.error(f"⚠️ Global error on {type(event).__name__}: {exception}", exc_info=True)
 
 async def main():
-    # ✅ Start web server FIRST (for Render uptime)
+    # ✅ Web server start
     try:
         await start_web_server()
     except Exception as e:
         log.error(f"Web server failed (continuing anyway): {e}")
 
     bot = Bot(token=BOT_TOKEN)
+    
+    # ✅ CRITICAL: Delete any existing webhook before polling
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        log.info("✅ Webhook cleared, pending updates dropped")
+    except Exception as e:
+        log.warning(f"Webhook delete failed: {e}")
+    
+    # ✅ CRITICAL: Wait before starting polling (avoid conflict)
+    await asyncio.sleep(3)
+    
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(R)
-    
-    # ✅ Register global error handler — bot won't crash on errors
     dp.errors.register(global_error_handler)
     
     me = await bot.get_me()
     log.info(f"@{me.username} — SMS Blast Bot {_VERSION} started!")
+    
+    # ... baaki code same
 
     scanner_task = asyncio.create_task(background_firebase_scanner(bot))
     log.info("Background scanner task created")
