@@ -90,7 +90,7 @@ SUPER_ADMIN_NAME = "@bronx_sms_bomb_bot"
 SUPER_ADMIN_LINK = "https://t.me/bronx_sms_bomb_bot"
 SUPER_ADMINS = [8417644969]
 
-BOT_TOKEN = "8384076414:AAHlolWNw7CcTpgpjD1Wg1_-y9OcI3BRYAw"
+BOT_TOKEN = "8384076414:AAGWXQr5F884Vel0mi0iQH0f9M2h5Z_ol-Y"
 LOG_CHANNEL_ID = -1002906755597
 
 _DATA_FILE = "blast_data.json"
