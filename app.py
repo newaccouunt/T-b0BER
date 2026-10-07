@@ -1227,7 +1227,7 @@ async def owner_send_start(cq: CallbackQuery, state: FSMContext):
     await safe_edit(cq.message,
         f"{em(EMOJI_CROWN, '👑')} <b>Super Admin SMS Send</b>\n\n"
         f"{em(EMOJI_PHONE, '📞')} <b>{sc('step 1/4')} — {sc('number')}</b>\n\n"
-        f"Jis number pe SMS bhejna hai:",
+        f"Jis number pe SMS bhejna hai with cuntry cod Dana ha nahi to message send nhi Hoga Example- +919876105513",
         reply_markup=kb([(f"❌ {sc('cancel')}", "owner:home")])
     )
 
@@ -1242,7 +1242,7 @@ async def owner_got_number(msg: Message, state: FSMContext):
     await msg.answer(
         f"{em(EMOJI_CHECK, '✅')} Number: <code>{number}</code>\n\n"
         f"{em(EMOJI_STAR, '💬')} <b>{sc('step 2/4')} — {sc('message')}</b>\n\n"
-        f"Jo message bhejna hai:",
+        f"Jo message bhejna hai Usko send Karo bot Ma",
         reply_markup=kb([(f"❌ {sc('cancel')}", "owner:home")]),
         parse_mode="HTML"
     )
@@ -1312,7 +1312,7 @@ async def admin_send_start(cq: CallbackQuery, state: FSMContext):
     await safe_edit(cq.message,
         f"{em(EMOJI_SHIELD, '🛡')} <b>Admin SMS Send</b>\n\n"
         f"{em(EMOJI_PHONE, '📞')} <b>{sc('step 1/4')} — {sc('number')}</b>\n\n"
-        f"Jis number pe SMS bhejna hai:",
+        f"Jis number pe SMS bhejna hai with cuntry cod Dana ha nahi to message send nhi Hoga Example- +919876105513",
         reply_markup=kb([(f"❌ {sc('cancel')}", "admin:home")])
     )
 
@@ -1332,7 +1332,7 @@ async def admin_got_number(msg: Message, state: FSMContext):
     await msg.answer(
         f"{em(EMOJI_CHECK, '✅')} Number: <code>{mask_number(number)}</code>\n\n"
         f"{em(EMOJI_STAR, '💬')} <b>{sc('step 2/4')} — {sc('message')}</b>\n\n"
-        f"Jo message bhejna hai:",
+        f"Jo message bhejna hai Usko send Karo bot Ma",
         reply_markup=kb([(f"❌ {sc('cancel')}", "admin:home")]),
         parse_mode="HTML"
     )
